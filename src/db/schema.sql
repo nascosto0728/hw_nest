@@ -25,6 +25,9 @@ CREATE TABLE columns (
   name TEXT NOT NULL,
   position INT NOT NULL CHECK (position >= 1),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- DEFERRABLE INITIALLY DEFERRED: allows intermediate states during reordering
+  -- within a transaction where positions may temporarily violate uniqueness
+  -- (e.g., shift existing positions before inserting new one)
   CONSTRAINT columns_board_id_position_unique UNIQUE (board_id, position) DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -36,6 +39,8 @@ CREATE TABLE tasks (
   "order" INT NOT NULL CHECK ("order" >= 1),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- DEFERRABLE INITIALLY DEFERRED: allows move/reorder operations within a single
+  -- transaction without violating the unique constraint at each intermediate UPDATE step
   CONSTRAINT tasks_column_id_order_unique UNIQUE (column_id, "order") DEFERRABLE INITIALLY DEFERRED
 );
 

@@ -2,6 +2,12 @@ import { query } from '../db';
 import { Column } from '../types';
 import { PoolClient } from 'pg';
 
+export interface ColumnOwnerInfo {
+  id: number;
+  boardId: number;
+  ownerId: number;
+}
+
 export async function createColumn(
   boardId: number,
   name: string,
@@ -27,6 +33,31 @@ export async function getColumnById(id: number, client?: PoolClient): Promise<Co
   return result.rows[0] || null;
 }
 
+/**
+ * 在 transaction 內取得 column 的 boardId 與 project ownerId，並對 column row 上寫鎖。
+ * 用於 moveTask / deleteTask 在 transaction 內部完成授權驗證，避免 race condition。
+ */
+export async function getColumnWithBoardOwner(
+  columnId: number,
+  client: PoolClient
+): Promise<ColumnOwnerInfo | null> {
+  const result = await client.query(
+    `SELECT c.id, c.board_id AS "boardId", p.owner_id AS "ownerId"
+     FROM columns c
+     JOIN boards b ON b.id = c.board_id
+     JOIN projects p ON p.id = b.project_id
+     WHERE c.id = $1
+     FOR UPDATE OF c`,
+    [columnId]
+  );
+  return result.rows[0] || null;
+}
+
+/**
+ * 取得目前 board 內最大 position。
+ * 注意：不使用 FOR UPDATE + aggregate（PostgreSQL 不支援）。
+ * 並發衝突由 UNIQUE (board_id, position) DEFERRABLE INITIALLY DEFERRED 在 commit 時攔截。
+ */
 export async function getMaxPositionInBoard(boardId: number, client?: PoolClient): Promise<number> {
   const q = client ? client.query.bind(client) : query;
   const result = await q(

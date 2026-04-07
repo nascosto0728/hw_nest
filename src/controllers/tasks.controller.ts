@@ -96,13 +96,23 @@ export async function moveTask(req: Request, res: Response, next: NextFunction):
       return;
     }
 
+    // Spec §4.6: newOrder must be >= 1
+    if (parseInt(newOrder, 10) < 1) {
+      res.status(400).json({ error: 'newOrder must be >= 1' });
+      return;
+    }
+
     const result = await tasksService.moveTask(
       taskId,
       parseInt(toColumnId, 10),
       parseInt(newOrder, 10),
       userId
     );
-    res.status(200).json(result);
+    res.status(200).json({
+      id: Number(result.id),
+      columnId: Number(result.columnId),
+      order: Number(result.order),
+    });
   } catch (err) {
     next(err);
   }

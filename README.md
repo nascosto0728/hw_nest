@@ -146,6 +146,8 @@ The move operation runs inside a PostgreSQL transaction with row-level locking (
 2. Target column: tasks with `order >= newOrder` shift up (+1)
 3. Task itself: updated with new `column_id` and `order`
 
-**Clamping:**
-- Same column: newOrder is clamped to `1..task_count`
-- Cross-column: newOrder is clamped to `1..(target_count + 1)`
+**Clamping & Validation:**
+- `newOrder` must be `>= 1`, otherwise returns `400 Bad Request`.
+- Same column: upper bound is clamped to `task_count`
+- Cross-column: upper bound is clamped to `(target_count + 1)`
+

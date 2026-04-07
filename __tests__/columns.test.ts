@@ -69,20 +69,20 @@ describe('Columns', () => {
       .set('Authorization', `Bearer ${token}`);
 
     expect(boardRes.status).toBe(200);
-    const columns = boardRes.body.columns as Array<{ id: number; position: number }>;
+    const columns = boardRes.body.columns as Array<{ id: number | string; position: number }>;
 
     // Filter out any default board columns that came with the project
-    const ourCols = columns.filter(c => c.id === col1.id || c.id === col3.id);
+    const ourCols = columns.filter(c => Number(c.id) === col1.id || Number(c.id) === col3.id);
     expect(ourCols.length).toBe(2);
 
     // Positions should be consecutive integers
-    const positions = ourCols.map(c => c.position).sort((a, b) => a - b);
+    const positions = ourCols.map(c => Number(c.position)).sort((a, b) => a - b);
     for (let i = 1; i < positions.length; i++) {
       expect(positions[i] - positions[i - 1]).toBe(1);
     }
 
     // col2 should be gone
-    const deletedCol = columns.find(c => c.id === col2.id);
+    const deletedCol = columns.find(c => Number(c.id) === col2.id);
     expect(deletedCol).toBeUndefined();
   });
 });

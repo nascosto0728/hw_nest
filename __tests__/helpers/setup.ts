@@ -58,7 +58,8 @@ export async function createProject(token: string, name = 'Test Project'): Promi
   if (res.status !== 201) {
     throw new Error(`createProject failed: ${res.status} ${JSON.stringify(res.body)}`);
   }
-  return res.body as ProjectResult;
+  const body = res.body as { id: number | string; name: string; boardId: number | string };
+  return { id: Number(body.id), name: body.name, boardId: Number(body.boardId) };
 }
 
 export interface ColumnResult {
@@ -77,7 +78,8 @@ export async function createColumn(token: string, boardId: number, name = 'Test 
   if (res.status !== 201) {
     throw new Error(`createColumn failed: ${res.status} ${JSON.stringify(res.body)}`);
   }
-  return res.body as ColumnResult;
+  const body = res.body as { id: number | string; board_id: number | string; name: string; position: number };
+  return { id: Number(body.id), board_id: Number(body.board_id), name: body.name, position: Number(body.position) };
 }
 
 export interface TaskResult {
@@ -102,5 +104,12 @@ export async function createTask(
   if (res.status !== 201) {
     throw new Error(`createTask failed: ${res.status} ${JSON.stringify(res.body)}`);
   }
-  return res.body as TaskResult;
+  const body = res.body as { id: number | string; column_id: number | string; title: string; description: string; order: number };
+  return {
+    id: Number(body.id),
+    column_id: Number(body.column_id),
+    title: body.title,
+    description: body.description,
+    order: Number(body.order),
+  };
 }

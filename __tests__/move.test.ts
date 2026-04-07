@@ -14,8 +14,13 @@ async function getTasksInColumn(
   if (res.status !== 200) {
     throw new Error(`getTasksInColumn failed: ${res.status} ${JSON.stringify(res.body)}`);
   }
-  return (res.body as Array<{ id: number; column_id: number; order: number; title: string }>)
-    .filter(t => t.column_id === columnId)
+  // API returns grouped format: { columnId, tasks }[]
+  // Use Number() comparison to handle pg driver returning BIGINT as string
+  const grouped = res.body as Array<{ columnId: number | string; tasks: Array<{ id: number | string; column_id: number | string; order: number; title: string }> }>;
+  const colGroup = grouped.find(g => Number(g.columnId) === Number(columnId));
+  if (!colGroup) return [];
+  return colGroup.tasks
+    .map(t => ({ ...t, id: Number(t.id), column_id: Number(t.column_id), order: Number(t.order) }))
     .sort((a, b) => a.order - b.order);
 }
 
@@ -164,33 +169,34 @@ describe('Move Task', () => {
     expect(byId[t3.id]).toBe(2);
   });
 
-  it('newOrder = 0 → 自動夾值到 1', async () => {
+  it('newOrder = 0 → 400（Spec §4.6: newOrder must be >= 1）', async () => {
     const t1 = await createTask(token, col1Id, 'T1');
     const t2 = await createTask(token, col1Id, 'T2');
 
-    // Move t2 with newOrder=0 (clamped to 1)
     const res = await moveTask(token, t2.id, col1Id, 0);
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('order', 1);
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
 
+    // Orders should be unchanged
     const tasks = await getTasksInColumn(token, boardId, col1Id);
     const byId = Object.fromEntries(tasks.map(t => [t.id, t.order]));
-    expect(byId[t2.id]).toBe(1);
-    expect(byId[t1.id]).toBe(2);
+    expect(byId[t1.id]).toBe(1);
+    expect(byId[t2.id]).toBe(2);
   });
 
-  it('newOrder 負數 → 自動夾值到 1', async () => {
+  it('newOrder 負數 → 400（Spec §4.6: newOrder must be >= 1）', async () => {
     const t1 = await createTask(token, col1Id, 'T1');
     const t2 = await createTask(token, col1Id, 'T2');
 
     const res = await moveTask(token, t2.id, col1Id, -5);
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('order', 1);
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
 
+    // Orders should be unchanged
     const tasks = await getTasksInColumn(token, boardId, col1Id);
     const byId = Object.fromEntries(tasks.map(t => [t.id, t.order]));
-    expect(byId[t2.id]).toBe(1);
-    expect(byId[t1.id]).toBe(2);
+    expect(byId[t1.id]).toBe(1);
+    expect(byId[t2.id]).toBe(2);
   });
 
   it('移到同欄最後（newOrder = count）', async () => {
@@ -242,4 +248,17 @@ describe('Move Task', () => {
     const uniqueOrders = new Set(orders);
     expect(uniqueOrders.size).toBe(10);
   }, 30000);
+
+  it('跨 board 移動 → 400（Spec §4.5: cross-board move not allowed）', async () => {
+    // Create a second project (different board) for the same user
+    const project2 = await createProject(token, 'Another Project');
+    const col3 = await createColumn(token, project2.boardId, 'Other Board Col');
+
+    const t1 = await createTask(token, col1Id, 'T1 in board 1');
+
+    // Try to move t1 to a column on a different board
+    const res = await moveTask(token, t1.id, col3.id, 1);
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+  });
 });

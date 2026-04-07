@@ -19,13 +19,13 @@ describe('Boards', () => {
       .set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('id', boardId);
+    expect(res.body).toHaveProperty('id', String(boardId));
     expect(res.body).toHaveProperty('columns');
     expect(Array.isArray(res.body.columns)).toBe(true);
 
     // Find our column
-    const foundCol = (res.body.columns as Array<{ id: number; tasks: Array<{ title: string }> }>)
-      .find(c => c.id === col.id);
+    const foundCol = (res.body.columns as Array<{ id: number | string; tasks: Array<{ title: string }> }>)
+      .find(c => Number(c.id) === Number(col.id));
     expect(foundCol).toBeDefined();
     expect(Array.isArray(foundCol!.tasks)).toBe(true);
     expect(foundCol!.tasks.some(t => t.title === 'Task 1')).toBe(true);

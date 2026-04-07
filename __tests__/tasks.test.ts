@@ -33,12 +33,14 @@ describe('Tasks', () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
 
-    // Find tasks in our column
-    const tasks = (res.body as Array<{ column_id: number; order: number; title: string }>)
-      .filter(t => t.column_id === col.id);
+    // Grouped format: [{ columnId, tasks: [...] }]
+    const grouped = res.body as Array<{ columnId: number | string; tasks: Array<{ column_id: number | string; order: number; title: string }> }>;
+    const colGroup = grouped.find(g => Number(g.columnId) === Number(col.id));
+    expect(colGroup).toBeDefined();
+    expect(colGroup!.tasks.length).toBe(3);
 
-    expect(tasks.length).toBe(3);
     // Verify order is ascending
+    const tasks = colGroup!.tasks.map(t => ({ ...t, order: Number(t.order) }));
     for (let i = 1; i < tasks.length; i++) {
       expect(tasks[i].order).toBeGreaterThan(tasks[i - 1].order);
     }
@@ -88,9 +90,10 @@ describe('Tasks', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(listRes.status).toBe(200);
 
-    const remaining = (listRes.body as Array<{ id: number; column_id: number; order: number }>)
-      .filter(t => t.column_id === col.id)
-      .sort((a, b) => a.order - b.order);
+    // Grouped format: [{ columnId, tasks: [...] }]
+    const grouped = listRes.body as Array<{ columnId: number | string; tasks: Array<{ id: number | string; column_id: number | string; order: number }> }>;
+    const colGroup = grouped.find(g => Number(g.columnId) === Number(col.id));
+    const remaining = (colGroup?.tasks ?? []).map(t => ({ ...t, id: Number(t.id), order: Number(t.order) })).sort((a, b) => a.order - b.order);
 
     expect(remaining.length).toBe(2);
     expect(remaining.map(t => t.id)).toContain(t1.id);
@@ -120,8 +123,8 @@ describe('Tasks', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(listRes.status).toBe(200);
 
-    const colTasks = (listRes.body as Array<{ column_id: number }>)
-      .filter(t => t.column_id === col.id);
-    expect(colTasks.length).toBe(0);
+    const colTasks = (listRes.body as Array<{ columnId: number | string; tasks: unknown[] }>)
+      .find(g => Number(g.columnId) === Number(col.id));
+    expect(!colTasks || colTasks.tasks.length === 0).toBe(true);
   });
 });

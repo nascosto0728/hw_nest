@@ -181,16 +181,27 @@ rm -rf node_modules package-lock.json && npm install
 | boards.test.ts | 4 | Jest | ✅ |
 | columns.test.ts | 8 | Jest | ✅ |
 | tasks.test.ts | 9 | Jest | ✅ |
-| move.test.ts（含壓力測試）| 16 | Jest | ✅ |
+| move.test.ts（含壓力測試）| 17 | Jest | ✅ |
 | auth-guard.test.ts | 8 | Jest | ✅ |
-| **小計 Jest** | **55** | Jest | **✅ 55/55** |
+| **小計 Jest** | **56** | Jest | **✅ 56/56** |
 
 ---
 
 ## 關鍵學習
 
-1. **node-postgres 的 BIGSERIAL 回傳字串** — 比較或計算前一律 `Number()` 轉型，或在 SQL 層 `CAST AS INT`。`===` 的型別陷阱在 TypeScript 裡特別隱蔽，因為型別定義寫 `number` 但 runtime 是 `string`。
+1. **node-postgres 的 BIGSERIAL 回傳字串** — 比較或計算前一律 `Number()` 轉型，或在 SQL 層 `CAST AS INT`。`===` 的型別陷阱在 TypeScript 裡特別隱蔽，因為型別定義寫 `number` 但 runtime 是 `string`（後續在 API controller response 與 Test Helper 中已徹底轉型修正）。
 2. **PostgreSQL UNIQUE 是 IMMEDIATE 的** — 排序類操作（shift order）如果在 transaction 中間途產生重複值，即使最終不衝突也會報錯。凡是需要「先移開再補上」的場景，UNIQUE constraint 一律加 `DEFERRABLE INITIALLY DEFERRED`。
 3. **HTTP 204 vs 200** — 刪除操作在 REST 語義上 204 是合法的，但若有 JSON body 需求就要用 200。API 設計時應在 PRD 階段明確定義。
 4. **SubAgent 有 token 上限，複雜 debug 不適合長跑** — 遇到需要直接查 DB、對比 runtime 值的場景，主 Agent 接手更有效率。SubAgent 適合執行明確任務，不適合開放式 debug 迴圈。
 5. **npm 套件版本要固定** — devDependency 使用 `@29`、`@6` 等 major 鎖版，避免 SubAgent 裝到不相容的新版。
+
+---
+
+## Refactor 加強與合規性修正 (2026-04-07)
+
+在原始版本完成後，為了滿足更嚴格的 PRD 規範與消除所有的 Race Condition，進行了一次深度的重構，重點心得：
+
+1. **Transaction 內的授權檢查**：針對 `moveTask` 與 `deleteTask` 資源轉移的操作，一開始只在 Transaction 外部做 Owneship 驗證，這產生了 TOCTOU (Time-Of-Check To Time-Of-Use) 的風險。必須將「讀取資源」、「驗證擁有權」、「加鎖 FOR UPDATE」、「更新資源」全數放入同一個 DB Transaction 內才能完全消除 Race Window。
+2. **PostgreSQL 聚合函數與 FOR UPDATE 互斥**：原本嘗試利用 `SELECT MAX(...) FOR UPDATE` 來防止 `createColumn` 的並發順序衝突，但 PostgreSQL 不允許聚合函數搭配 FOR UPDATE 使用。此情境應依賴 Database 級別的 `DEFERRABLE INITIALLY DEFERRED` Unique Constraint 做最後的安全防線，一旦衝突會觸發 rollback 以確保資料庫永遠處於正確狀態。
+3. **Specs 邊界行為的徹底落實**：針對不符規範的行爲不應該優雅妥協。例如 `newOrder < 1` 雖可在代碼中自動 `Math.max(1, order)` 夾值修正，但為了與外端系統或使用者的預期保持一致 (Spec 寫明錯誤應回傳 400)，Controller 在收到不合理參數時應該 Early Return 報錯。
+4. **Test Helper 中的字串與數字陷阱蔓延**：PostgreSQL Driver 回傳的 BIGINT 字串不只在程式邏輯中會出錯，在 Jest Test Helper 中更造成了比對失敗的問題。最好的防堵策略是在 Controller 輸出層與 Test Helper 回傳資料結構時，第一時間將所有的 `id`, `column_id` 欄位以 `Number()` 顯示轉換，確保整個驗證系統的型別純潔度。

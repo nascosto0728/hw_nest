@@ -4,9 +4,9 @@ import * as columnRepo from '../repositories/column.repository';
 import * as boardRepo from '../repositories/board.repository';
 import * as projectRepo from '../repositories/project.repository';
 import { createError } from '../middleware/error.middleware';
-import { Task } from '../types';
+import { Task, TaskGrouped } from '../types';
 
-// ─── Ownership helpers ────────────────────────────────────────────────────────
+// ─── Ownership helpers (used by createTask, updateTask, getTasksByBoard) ──────
 
 async function verifyColumnOwnership(columnId: number, userId: number): Promise<void> {
   const column = await columnRepo.getColumnById(columnId);
@@ -47,7 +47,10 @@ export async function createTask(
   return taskRepo.createTask(columnId, title.trim(), description, maxOrder + 1);
 }
 
-export async function getTasksByBoard(boardId: number, userId: number): Promise<Task[]> {
+/**
+ * Fix #8: 回傳 PRD §6.5 要求的分組格式 { columnId, tasks }[]，每組 tasks 按 order 升序排列。
+ */
+export async function getTasksByBoard(boardId: number, userId: number): Promise<TaskGrouped[]> {
   const board = await boardRepo.getBoardById(boardId);
   if (!board) throw createError('Board not found', 404);
 
@@ -56,7 +59,20 @@ export async function getTasksByBoard(boardId: number, userId: number): Promise<
     throw createError('Forbidden', 403);
   }
 
-  return taskRepo.getTasksByBoardId(boardId);
+  const flatTasks = await taskRepo.getTasksByBoardId(boardId);
+
+  // Group by column_id, preserving column order (sorted by column_id for consistency)
+  const map = new Map<number, Task[]>();
+  for (const task of flatTasks) {
+    const colId = Number(task.column_id);
+    if (!map.has(colId)) map.set(colId, []);
+    map.get(colId)!.push(task);
+  }
+
+  return Array.from(map.entries()).map(([columnId, tasks]) => ({
+    columnId,
+    tasks: tasks.sort((a, b) => Number(a.order) - Number(b.order)),
+  }));
 }
 
 export async function updateTask(
@@ -76,12 +92,23 @@ export async function updateTask(
   return updated;
 }
 
+/**
+ * deleteTask: 全部在 transaction 內完成，消除授權查詢與刪除之間的 race condition。
+ * 鎖定順序：task row → source column row（Spec §6）
+ */
 export async function deleteTask(taskId: number, userId: number): Promise<void> {
-  const task = await verifyTaskOwnership(taskId, userId);
-
   const client = await getClient();
   try {
     await client.query('BEGIN');
+
+    // 1. Lock task row（防止並發 delete/move 同一 task）
+    const task = await taskRepo.getTaskByIdForUpdate(taskId, client);
+    if (!task) throw createError('Task not found', 404);
+
+    // 2. 在 transaction 內驗證擁有權（消除 auth 與 delete 之間的 race window）
+    const colInfo = await columnRepo.getColumnWithBoardOwner(Number(task.column_id), client);
+    if (!colInfo) throw createError('Column not found', 404);
+    if (colInfo.ownerId !== userId) throw createError('Forbidden', 403);
 
     await taskRepo.deleteTask(taskId, client);
     await taskRepo.reorderTasksAfterDelete(Number(task.column_id), Number(task.order), client);
@@ -95,65 +122,84 @@ export async function deleteTask(taskId: number, userId: number): Promise<void> 
   }
 }
 
+/**
+ * moveTask: 所有步驟（授權、board 比對、排序更新）全部在單一 transaction 內完成。
+ * 鎖定順序：task → source column → target column（Spec §6，固定順序避免 deadlock）
+ * newOrder < 1 由 controller 提前攔截（回 400），此處 clamp 為防禦性保護。
+ *
+ * 修復清單：
+ * - Fix #1: 加入跨 board 驗證（sourceInfo.boardId !== targetInfo.boardId → 400）
+ * - Fix #2: 所有授權查詢移入 transaction 內，消除 race condition 窗口
+ */
 export async function moveTask(
   taskId: number,
   toColumnId: number,
   newOrder: number,
   userId: number
 ): Promise<{ id: number; columnId: number; order: number }> {
-  // Verify task exists and user owns it
-  await verifyTaskOwnership(taskId, userId);
-  // Verify target column belongs to same user
-  await verifyColumnOwnership(toColumnId, userId);
-
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
-    // Lock the task row
+    // ── Step 1: Lock task row（Spec §6 鎖定順序：task first）─────────────────
     const task = await taskRepo.getTaskByIdForUpdate(taskId, client);
     if (!task) throw createError('Task not found', 404);
 
+    const fromColumnId = Number(task.column_id);
     const oldOrder = Number(task.order);
-    const oldColumnId = Number(task.column_id);
-    const isSameColumn = oldColumnId === toColumnId;
+
+    // ── Step 2: 驗證 source column 擁有權（在 transaction 內，消除 race window）─
+    const sourceInfo = await columnRepo.getColumnWithBoardOwner(fromColumnId, client);
+    if (!sourceInfo) throw createError('Column not found', 404);
+    if (sourceInfo.ownerId !== userId) throw createError('Forbidden', 403);
+
+    // ── Step 3: 驗證 target column 擁有權（同時鎖定 target column row）─────────
+    const targetInfo = await columnRepo.getColumnWithBoardOwner(toColumnId, client);
+    if (!targetInfo) throw createError('Target column not found', 404);
+    if (targetInfo.ownerId !== userId) throw createError('Forbidden', 403);
+
+    // ── Step 4: 驗證 source 與 target 屬於同一個 board（Spec §4.5）────────────
+    if (sourceInfo.boardId !== targetInfo.boardId) {
+      throw createError('Cross-board move not allowed', 400);
+    }
+
+    const isSameColumn = fromColumnId === toColumnId;
 
     if (isSameColumn) {
-      // Clamp newOrder to 1..task_count
-      const taskCount = await taskRepo.getTaskCountInColumn(oldColumnId, client);
+      // ── 同欄位移動 ────────────────────────────────────────────────────────
+      const taskCount = await taskRepo.getTaskCountInColumn(fromColumnId, client);
       const clampedOrder = Math.max(1, Math.min(newOrder, taskCount));
 
       if (clampedOrder === oldOrder) {
-        // No change needed
         await client.query('COMMIT');
-        return { id: task.id, columnId: oldColumnId, order: oldOrder };
+        return { id: task.id, columnId: fromColumnId, order: oldOrder };
       }
 
       if (clampedOrder > oldOrder) {
-        // Shift tasks in (oldOrder, clampedOrder] down by 1
-        await taskRepo.shiftTasksInColumnDown(oldColumnId, oldOrder, clampedOrder, client);
+        // 區間 (oldOrder, clampedOrder] 的 tasks order - 1
+        await taskRepo.shiftTasksInColumnDown(fromColumnId, oldOrder, clampedOrder, client);
       } else {
-        // Shift tasks in [clampedOrder, oldOrder) up by 1
-        await taskRepo.shiftTasksInColumnUp(oldColumnId, clampedOrder, oldOrder, client);
+        // 區間 [clampedOrder, oldOrder) 的 tasks order + 1
+        await taskRepo.shiftTasksInColumnUp(fromColumnId, clampedOrder, oldOrder, client);
       }
 
-      const updated = await taskRepo.moveTaskToColumn(taskId, oldColumnId, clampedOrder, client);
+      const updated = await taskRepo.moveTaskToColumn(taskId, fromColumnId, clampedOrder, client);
       await client.query('COMMIT');
 
       return { id: updated!.id, columnId: updated!.column_id, order: updated!.order };
     } else {
-      // Cross-column move
+      // ── 跨欄位移動 ────────────────────────────────────────────────────────
       const targetCount = await taskRepo.getTaskCountInColumn(toColumnId, client);
       const clampedOrder = Math.max(1, Math.min(newOrder, targetCount + 1));
 
-      // Shift source column: tasks with order > oldOrder shift down
-      await taskRepo.shiftTasksInSourceColumnAfterRemove(oldColumnId, oldOrder, client);
+      // Source 欄位：order > oldOrder 的 tasks order - 1（補位）
+      await taskRepo.shiftTasksInSourceColumnAfterRemove(fromColumnId, oldOrder, client);
 
-      // Shift target column: tasks with order >= clampedOrder shift up
+      // Target 欄位：order >= clampedOrder 的 tasks order + 1（騰位）
       await taskRepo.shiftTasksInTargetColumnBeforeInsert(toColumnId, clampedOrder, client);
 
-      // Move the task itself
-      const updated = await taskRepo.moveTaskToColumn(taskId, toColumnId, clampedOrder, client);
+      // 更新 task 本身
+       const updated = await taskRepo.moveTaskToColumn(taskId, toColumnId, clampedOrder, client);
       await client.query('COMMIT');
 
       return { id: updated!.id, columnId: updated!.column_id, order: updated!.order };
